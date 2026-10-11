@@ -51,25 +51,32 @@ function simpleDom() {
   });
 }
 
-test('registers only the supported completed-reply action slot and disposes styles', () => {
+test('registers file action and its own plugin-manager settings row, then disposes styles', () => {
   const dom = simpleDom();
   const client = loadClient(dom);
-  let slotName;
-  let registration;
+  const registrations = [];
+  const forms = [];
   let styleDispose;
   const ctx = {
-    remote: {},
+    remote: {}, get: () => undefined,
+    configForms: { get: (namespace) => { forms.push(namespace); return { getSnapshot: () => ({ status: 'ready' }),
+      subscribe: () => () => {} }; } },
     slots: {
-      inject: (name, callback) => { slotName = name; callback(); },
-      register: (options, component) => { registration = { options, component }; return () => {}; }
+      inject: (_name, callback) => { callback(); },
+      register: (options, component) => { registrations.push({ options, component }); return () => {}; }
     },
     effect: (callback) => { styleDispose = callback(); }
   };
   client.apply(ctx);
-  assert.equal(slotName, 'conversation.chat.assistant-actions');
+  assert.deepEqual(forms, ['chat-file-actions']);
+  const registration = registrations.find(({ options }) => options.name === 'conversation.chat.assistant-actions');
   assert.equal(registration.options.id, 'turn-files');
   assert.equal(registration.options.order, 70);
+  assert.equal(registration.options.inject().form.getSnapshot().status, 'ready');
   assert.equal(typeof registration.component, 'function');
+  const settings = registrations.find(({ options }) => options.name === 'plugins.row.config');
+  assert.equal(settings.options.key, 'dsh-chat-file-actions#chat-file-actions');
+  assert.equal(settings.component, client.SettingsPage);
   assert.equal(dom.window.document.querySelectorAll('style[data-plugin-css="dsh-chat-file-actions"]').length, 1);
   styleDispose();
   assert.equal(dom.window.document.querySelectorAll('style[data-plugin-css="dsh-chat-file-actions"]').length, 0);
@@ -159,6 +166,22 @@ test('copies escaped Markdown without confusing encoded filename characters', ()
   dom.window.close();
 });
 
+test('settings normalize ordered copies and encode session-scoped sidebar addresses', () => {
+  const dom = simpleDom();
+  const { readSettings, sessionFileAddress } = loadClient(dom);
+  assert.deepEqual(Array.from(readSettings(undefined).copyActions), ['path', 'name', 'markdown']);
+  const settings = readSettings({ openMode: 'sidebar',
+    copyActions: ['markdown', 'missing', 'path', 'markdown'] });
+  assert.equal(settings.openMode, 'sidebar');
+  assert.deepEqual(Array.from(settings.copyActions), ['markdown', 'path']);
+  assert.equal(readSettings({ openMode: 'unknown', copyActions: [] }).openMode, 'system');
+  assert.equal(sessionFileAddress('session A', '/work/a #1?.pdf'),
+    'dsh-resource://file/session/session%20A//work/a%20%231%3F.pdf');
+  assert.equal(sessionFileAddress('S', String.raw`C:\work\.env`),
+    'dsh-resource://file/session/S/C:/work/.env');
+  dom.window.close();
+});
+
 test('actual React slot hides without files and uses Host stat before native actions', async () => {
   const dom = simpleDom();
   globalThis.window = dom.window;
@@ -220,6 +243,131 @@ test('actual React slot hides without files and uses Host stat before native act
     assert.equal(copied[0], '/workspace-A/deck.pptx');
     assert.equal(copied[1], 'deck.pptx');
     assert.match(copied[2], /^\[deck.pptx\]\(<\/workspace-A\/deck.pptx>\)$/u);
+  } finally {
+    await act(async () => { root.unmount(); });
+    dom.window.close();
+  }
+});
+
+test('plugin manager settings save an ordered subset and open mode with a revision fence', async () => {
+  const dom = simpleDom();
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const client = loadClient(dom);
+  const root = createRoot(dom.window.document.querySelector('#mount'));
+  const writes = [];
+  const form = { state: { status: 'ready', writable: true, mode: 'host', revision: 7,
+    value: { openMode: 'system', copyActions: ['path', 'name', 'markdown'] } },
+    mutate: async (ops, revision) => { writes.push({ ops, revision }); return true; } };
+  try {
+    await act(async () => { root.render(React.createElement(client.SettingsPage, { view: 'page', form })); });
+    assert.equal(dom.window.document.querySelectorAll('.dtfa-settings input[type="checkbox"]').length, 3);
+    await act(async () => { dom.window.document.querySelector('input[value="sidebar"]').click(); });
+    await act(async () => { dom.window.document.querySelectorAll('input[type="checkbox"]')[1].click(); });
+    await act(async () => { dom.window.document.querySelector('[aria-label="上移复制链接"]').click(); });
+    await act(async () => { dom.window.document.querySelector('.dtfa-settings-save').click(); });
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].revision, 7);
+    assert.deepEqual(JSON.parse(JSON.stringify(writes[0].ops.map(({ value }) => value))),
+      ['sidebar', ['markdown', 'path']]);
+    assert.match(dom.window.document.querySelector('[role="status"]').textContent, /设置已保存/u);
+    await act(async () => { root.render(React.createElement(client.SettingsPage, { view: 'summary', form })); });
+    assert.match(dom.window.document.querySelector('#mount').textContent, /系统应用打开/u);
+  } finally {
+    await act(async () => { root.unmount(); });
+    dom.window.close();
+  }
+});
+
+test('side mode opens the verified file in the matching DSH session without native fallback', async () => {
+  const dom = simpleDom();
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const ReactDOM = await import('react-dom');
+  const client = loadClient(dom, ReactDOM);
+  const root = createRoot(dom.window.document.querySelector('#mount'));
+  const state = { status: 'ready', value: { openMode: 'sidebar', copyActions: ['markdown', 'path'] } };
+  const form = { getSnapshot: () => state, subscribe: () => () => {} };
+  const addresses = [];
+  const native = [];
+  let visibleSession = 'session-A';
+  let sidebarAvailable = true;
+  const sidebar = { mounted: { getSnapshot: () => visibleSession },
+    openResource: (address) => { addresses.push(address); } };
+  const remote = { workspaceFiles: { stat: async () => ({ ok: true,
+    value: { absolutePath: '/work/report #1.pdf' } }) },
+    session: { openWorkspacePath: async (request) => { native.push(request); return { ok: true }; } } };
+  try {
+    await act(async () => { root.render(React.createElement(client.TurnFilesAction, {
+      messageId: 'answer', sessionId: 'session-A', remote, form,
+      getSidebarRight: () => sidebarAvailable ? sidebar : undefined,
+      useChat: (selector) => selector(snapshotFor({ assistant: '[report](<docs/report%20%231.pdf>)' }))
+    })); });
+    await act(async () => { dom.window.document.querySelector('[data-turn-files-button]').click(); });
+    const row = dom.window.document.querySelector('.dtfa-row');
+    assert.match(row.querySelector('.dtfa-open').getAttribute('aria-label'), /在侧栏打开/u);
+    await act(async () => { row.querySelector('.dtfa-open').click(); });
+    assert.deepEqual(addresses, ['dsh-resource://file/session/session-A//work/report%20%231.pdf']);
+    assert.equal(native.length, 0);
+    assert.match(dom.window.document.querySelector('[role="status"]').textContent, /已请求在 DSH 侧栏打开/u);
+    await act(async () => { row.querySelector('[title="更多操作"]').click(); });
+    assert.deepEqual([...row.querySelectorAll('.dtfa-more-action')].map((node) => node.textContent),
+      ['用系统应用打开', '复制链接', '复制路径']);
+    visibleSession = 'another-session';
+    await act(async () => { row.querySelector('.dtfa-open').click(); });
+    assert.equal(addresses.length, 1);
+    assert.equal(native.length, 0);
+    assert.match(dom.window.document.querySelector('[role="status"]').textContent, /当前会话的 DSH 侧栏不可用/u);
+    visibleSession = 'session-A';
+    sidebarAvailable = false;
+    await act(async () => { row.querySelector('.dtfa-open').click(); });
+    assert.equal(addresses.length, 1);
+    assert.equal(native.length, 0);
+    await act(async () => { row.querySelector('.dtfa-more-action').click(); });
+    assert.equal(native.length, 1);
+    assert.equal(native[0].path, '/work/report #1.pdf');
+  } finally {
+    await act(async () => { root.unmount(); });
+    dom.window.close();
+  }
+});
+
+test('empty copy menu disappears, but unreadable settings keep explicit system open', async () => {
+  const dom = simpleDom();
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const ReactDOM = await import('react-dom');
+  const client = loadClient(dom, ReactDOM);
+  const root = createRoot(dom.window.document.querySelector('#mount'));
+  const listeners = new Set();
+  let state = { status: 'ready', value: { openMode: 'system', copyActions: [] } };
+  const form = { getSnapshot: () => state, subscribe: (listener) => {
+    listeners.add(listener); return () => listeners.delete(listener);
+  } };
+  const remote = { workspaceFiles: { stat: async () => ({ ok: true,
+    value: { absolutePath: '/workspace/report.pdf' } }) }, session: {} };
+  try {
+    await act(async () => { root.render(React.createElement(client.TurnFilesAction, {
+      messageId: 'answer', sessionId: 'session-A', remote, form,
+      useChat: (selector) => selector(snapshotFor({ assistant: '[report](report.pdf)' }))
+    })); });
+    await act(async () => { dom.window.document.querySelector('[data-turn-files-button]').click(); });
+    assert.equal(dom.window.document.querySelector('[title="更多操作"]'), null);
+    state = { status: 'unavailable', value: { openMode: 'system', copyActions: [] } };
+    await act(async () => { for (const listener of listeners) listener(); });
+    assert.equal(dom.window.document.querySelector('.dtfa-open').disabled, true);
+    await act(async () => { dom.window.document.querySelector('[title="更多操作"]').click(); });
+    assert.deepEqual([...dom.window.document.querySelectorAll('.dtfa-more-action')].map((node) => node.textContent),
+      ['用系统应用打开']);
   } finally {
     await act(async () => { root.unmount(); });
     dom.window.close();
@@ -295,7 +443,8 @@ test('large file turns scroll inside the panel with at most six concurrent stat 
     assert.equal(dom.window.document.querySelectorAll('[role="listitem"]').length, 80);
     // CSS is installed by apply() in production; call it here to inspect scroll and theme rules.
     let dispose;
-    client.apply({ remote, slots: { inject: () => {} }, effect: (effect) => { dispose = effect(); } });
+    client.apply({ remote, configForms: { get: () => ({}) }, slots: { inject: () => {} },
+      effect: (effect) => { dispose = effect(); } });
     const styles = dom.window.document.querySelector('style[data-plugin-css="dsh-chat-file-actions"]').textContent;
     assert.match(styles, /\.dtfa-list\s*\{[^}]*overflow-y:auto/u);
     assert.match(styles, /--dsw-alias-bg-overlay/u);
