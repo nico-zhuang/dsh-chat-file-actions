@@ -33,7 +33,7 @@ function loadClient(dom, reactDom = { createPortal: (node) => node }) {
   });
 }
 
-function snapshotFor({ user = '', assistant = '', messageId = 'answer', turn = 5, older = '' } = {}) {
+function snapshotFor({ user = '', assistant = '', messageId = 'answer', turn = 5, older = '', tools = [] } = {}) {
   const nodes = new Map([
     ['u1', { kind: 'user', anchorSeq: 1, data: { content: [{ type: 'text', text: user }] } }],
     ['a1', { kind: 'assistant-step', anchorSeq: 3, data: { turn,
@@ -42,7 +42,24 @@ function snapshotFor({ user = '', assistant = '', messageId = 'answer', turn = 5
     ['a2', { kind: 'assistant-step', anchorSeq: 8, data: { turn: 6,
       finalNode: { messageId: 'later', seq: 8 }, blocks: [{ kind: 'text', text: '[later](later.jpg)' }] } }]
   ]);
-  return { nodes, locations: { getTurn: (key) => key === turn ? ['u1', 'a1'] : ['u2', 'a2'] } };
+  const toolKeys = tools.map((tool, index) => {
+    const key = `tool${index}`;
+    nodes.set(key, { kind: 'tool-call', anchorSeq: tool.anchorSeq ?? 2,
+      visibility: tool.visibility, data: { root: tool.root } });
+    return key;
+  });
+  return { nodes, locations: { getTurn: (key) => key === turn ? ['u1', ...toolKeys, 'a1'] : ['u2', 'a2'] } };
+}
+
+function editedTool(path, overrides = {}) {
+  return { root: { kind: 'tool-result', seq: 2, isError: false,
+    call: { name: 'edit', argsRaw: JSON.stringify({ file_path: path }) },
+    meta: { diffs: [{ path, oldText: 'old', newText: 'new' }] }, ...overrides } };
+}
+
+function createdTool(path) {
+  return editedTool(path, { call: { name: 'write', argsRaw: JSON.stringify({ file_path: path }) },
+    meta: { operation: 'create', diffs: [] } });
 }
 
 function simpleDom() {
@@ -114,6 +131,19 @@ test('excludes indented code and HTML comments, decodes escaped Markdown destina
   dom.window.close();
 });
 
+test('escaped and unmatched backticks do not hide subsequent real links', () => {
+  const dom = simpleDom();
+  const { extractFileCandidates } = loadClient(dom);
+  const files = extractFileCandidates([
+    'Escaped \\` and [report](report.pdf)',
+    'Unclosed ` and [summary](summary.pdf)',
+    '`[hidden](hidden.pdf)` [visible](visible.pdf)'
+  ]);
+  assert.deepEqual(Array.from(files, ({ path }) => path),
+    ['report.pdf', 'summary.pdf', 'visible.pdf']);
+  dom.window.close();
+});
+
 test('only a whitespace-terminated closing fence ends a code block', () => {
   const dom = simpleDom();
   const { extractFileCandidates } = loadClient(dom);
@@ -159,10 +189,130 @@ test('collects only the addressed answer and its own turn, not another conversat
   dom.window.close();
 });
 
+test('keeps explicit web links and local files in one ordered, deduped turn list', () => {
+  const dom = simpleDom();
+  const { extractTurnCandidates, copyWebMarkdown, webDestination } = loadClient(dom);
+  const candidates = extractTurnCandidates([
+    { type: 'text', text: '[Release](https://GitHub.com/nico/releases) [README](README.md) ' +
+      '[package](https://github.com/nico/pkg.tgz?download=1#asset) ' +
+      '[again](https://github.com/nico/releases) `[_ignored](https://evil.test)`' },
+    { type: 'edited-file', path: 'README.md' }
+  ]);
+  assert.deepEqual(Array.from(candidates, (item) => [item.type, item.path || item.url]), [
+    ['web', 'https://github.com/nico/releases'], ['file', 'README.md'],
+    ['web', 'https://github.com/nico/pkg.tgz?download=1#asset']
+  ]);
+  assert.equal(candidates[1].edited, true);
+  assert.equal(candidates[0].host, 'github.com');
+  assert.equal(copyWebMarkdown(candidates[2].url, '文件[包]'),
+    '[文件\\[包\\]](<https://github.com/nico/pkg.tgz?download=1#asset>)');
+  assert.equal(webDestination('HTTPS://Example.test/a')?.url, 'https://example.test/a');
+  const balanced = extractTurnCandidates([{ type: 'text', text:
+    '[React](https://en.wikipedia.org/wiki/React_(software)) ' +
+    '[report [PDF]](https://example.org/report) \\[escaped](https://ignore.example) ' +
+    '[broken [inner](https://example.org/inner)' }]);
+  assert.deepEqual(Array.from(balanced, (item) => [item.name, item.url]), [
+    ['React', 'https://en.wikipedia.org/wiki/React_(software)'],
+    ['report [PDF]', 'https://example.org/report'],
+    ['inner', 'https://example.org/inner']
+  ]);
+  for (const bad of ['javascript:alert(1)', 'file:///etc/passwd', '//evil.test/a',
+    'https://user:pass@example.test/a', String.raw`https://example.test\\@evil.test/a`,
+    'https://example.test/ with-space', 'https://example.test/\nnext',
+    'https://example.test/<bad>']) assert.equal(webDestination(bad), null, bad);
+  assert.deepEqual(Array.from(extractTurnCandidates([
+    { type: 'text', text: '[javascript](javascript:alert(1)) [plain](https://example.test) ' +
+      'https://unlinked.test [relative](README.md) <!-- [hidden](https://hidden.test) -->' }
+  ]), (item) => item.path || item.url), ['https://example.test/', 'README.md']);
+  const rawHtml = extractTurnCandidates([{ type: 'text', text:
+    '<pre>\n[hidden](https://hidden.test)\n</pre> ' +
+    '<span title="[attribute](https://attribute.test)">text</span> ' +
+    '[real](https://real.test)' }]);
+  assert.deepEqual(Array.from(rawHtml, (item) => item.url), ['https://real.test/']);
+  dom.window.close();
+});
+
+test('web URLs follow Markdown escaping and entities before validating true host', () => {
+  const dom = simpleDom();
+  const { extractTurnCandidates } = loadClient(dom);
+  const items = extractTurnCandidates([{ type: 'text', text: String.raw`
+[wiki](https://example.org/wiki/Foo_\(bar\))
+[angle](<https://example.org/wiki/Foo_\(bar\)>)
+[query](https://example.test/?a=1&amp;b=2)
+[host](https://trusted.example&#46;evil.example/path)
+[unknown](https://example.test/?x=&unknownEntity;)
+` }]);
+  assert.deepEqual(Array.from(items, ({ name, url, host }) => [name, url, host]), [
+    ['wiki', 'https://example.org/wiki/Foo_(bar)', 'example.org'],
+    ['query', 'https://example.test/?a=1&b=2', 'example.test'],
+    ['host', 'https://trusted.example.evil.example/path', 'trusted.example.evil.example']
+  ]);
+  dom.window.close();
+});
+
+test('accepts only successful same-turn structured edit/write diffs before the closing reply', () => {
+  const dom = simpleDom();
+  const { collectTurnSources, extractTurnCandidates } = loadClient(dom);
+  const write = editedTool('new file.md', { call: { name: 'write',
+    argsRaw: JSON.stringify({ file_path: 'new file.md' }) },
+    meta: { diffs: [{ path: 'new file.md', oldText: '', newText: 'hello' }] } });
+  const created = createdTool('fresh.md');
+  const snapshot = snapshotFor({ assistant: '已处理。', tools: [
+    editedTool('README.md'), write, created,
+    editedTool('broken.md', { isError: true }),
+    editedTool('untrusted.md', { meta: { diffs: [{ path: 'other.md' }] } }),
+    editedTool('late.md', { seq: 4 }),
+    { ...editedTool('hidden.md'), visibility: 'hidden' },
+    editedTool('prose.md', { call: { name: 'bash', argsRaw: '{"file_path":"prose.md"}' } }),
+    editedTool('invalid.md', { call: { name: 'edit', argsRaw: '{invalid' } })
+  ] });
+  const files = extractTurnCandidates(collectTurnSources(snapshot, 'answer'));
+  assert.deepEqual(Array.from(files, ({ path }) => path), ['README.md', 'new file.md', 'fresh.md']);
+  assert.ok(files.every((item) => item.edited));
+  assert.equal(files[2].created, true);
+  assert.equal(collectTurnSources(snapshot, 'unknown').length, 0);
+  dom.window.close();
+});
+
+test('reserves room for edited files after a turn with 200 web links', () => {
+  const dom = simpleDom();
+  const { extractTurnCandidates } = loadClient(dom);
+  const text = Array.from({ length: 200 }, (_, index) =>
+    `[link ${index}](https://example.test/${index})`).join(' ');
+  const items = extractTurnCandidates([{ type: 'text', text },
+    { type: 'edited-file', path: 'README.md' }]);
+  assert.equal(items.length, 200);
+  assert.equal(items.filter((item) => item.type === 'web').length, 199);
+  assert.equal(items.at(-1).path, 'README.md');
+  assert.equal(items.at(-1).edited, true);
+  dom.window.close();
+});
+
 test('copies escaped Markdown without confusing encoded filename characters', () => {
   const dom = simpleDom();
   const { copyMarkdown } = loadClient(dom);
   assert.equal(copyMarkdown('/local/a #b?.jpg', '图[一]'), '[图\\[一\\]](</local/a%20%23b%3F.jpg>)');
+  dom.window.close();
+});
+
+test('local and web Markdown entities round-trip without changing the target', () => {
+  const dom = simpleDom();
+  const { extractFileCandidates, extractTurnCandidates, copyMarkdown, copyWebMarkdown } = loadClient(dom);
+  assert.deepEqual(Array.from(extractFileCandidates([
+    '[rendered](<a&amp;b.pdf>) [literal](<a%26amp;b.pdf>) ' +
+      '[numeric](<a&#38;b.pdf>) [unknown](<a&notSupportedEntity;b.pdf>)'
+  ]), ({ path }) => path), ['a&b.pdf', 'a&amp;b.pdf']);
+  const local = copyMarkdown('a&amp;b.pdf', 'literally &amp;');
+  assert.equal(local, '[literally &#38;amp;](<a%26amp;b.pdf>)');
+  assert.equal(extractFileCandidates([local])[0].path, 'a&amp;b.pdf');
+  assert.equal(extractFileCandidates([copyMarkdown('a&b.pdf', 'rendered')])[0].path, 'a&b.pdf');
+  assert.equal(extractTurnCandidates([{ type: 'text', text:
+    String.raw`[escaped](<https://example.test/?q=\&amp;>)` }])[0].url,
+  'https://example.test/?q=&amp;');
+  const original = 'https://example.test/?x=&amp;&next=1';
+  const web = copyWebMarkdown(original, 'query');
+  assert.equal(web, '[query](<https://example.test/?x=&#38;amp;&next=1>)');
+  assert.equal(extractTurnCandidates([{ type: 'text', text: web }])[0].url, original);
   dom.window.close();
 });
 
@@ -180,6 +330,144 @@ test('settings normalize ordered copies and encode session-scoped sidebar addres
   assert.equal(sessionFileAddress('S', String.raw`C:\work\.env`),
     'dsh-resource://file/session/S/C:/work/.env');
   dom.window.close();
+});
+
+test('web-only turn uses native safe anchors and copies links without Host file calls', async () => {
+  const dom = simpleDom();
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: dom.window.navigator });
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const ReactDOM = await import('react-dom');
+  const client = loadClient(dom, ReactDOM);
+  const root = createRoot(dom.window.document.querySelector('#mount'));
+  const calls = [];
+  const copied = [];
+  Object.defineProperty(dom.window.navigator, 'clipboard', { configurable: true,
+    value: { writeText: async (text) => { copied.push(text); } } });
+  const remote = { workspaceFiles: { stat: () => { calls.push('stat'); } },
+    session: { openWorkspacePath: () => { calls.push('open'); } } };
+  const unavailable = { status: 'unavailable', value: undefined };
+  const form = { subscribe: () => () => {}, getSnapshot: () => unavailable };
+  try {
+    await act(async () => root.render(React.createElement(client.TurnFilesAction, {
+      messageId: 'answer', sessionId: 'S', remote, form,
+      useChat: (selector) => selector(snapshotFor({ assistant:
+        '[trusted.example](https://evil.example/landing?x=1#info) ' +
+        '[download](https://github.com/nico/pkg.tgz)' }))
+    })));
+    const trigger = dom.window.document.querySelector('[data-turn-files-button]');
+    assert.ok(trigger);
+    assert.match(trigger.getAttribute('aria-label'), /2 个候选/u);
+    await act(async () => trigger.click());
+    const rows = Array.from(dom.window.document.querySelectorAll('.dtfa-row'));
+    assert.equal(rows.length, 2);
+    assert.equal(calls.length, 0);
+    const anchor = rows[0].querySelector('a.dtfa-open');
+    assert.equal(anchor.href, 'https://evil.example/landing?x=1#info');
+    assert.equal(anchor.target, '_blank');
+    assert.equal(anchor.rel, 'noopener noreferrer');
+    assert.match(anchor.getAttribute('aria-label'), /evil\.example/u);
+    assert.equal(rows[0].querySelector('.dtfa-link-host').textContent, 'evil.example');
+    assert.equal(rows[0].querySelector('[title="在文件管理器中显示"]'), null);
+    await act(async () => rows[0].querySelector('[title="更多操作"]').click());
+    const actions = rows[0].querySelectorAll('.dtfa-more-action');
+    assert.deepEqual(Array.from(actions, (button) => button.textContent), ['复制网址', '复制 Markdown 链接']);
+    await act(async () => actions[0].click());
+    await act(async () => actions[1].click());
+    assert.deepEqual(copied, [anchor.href, '[trusted.example](<https://evil.example/landing?x=1#info>)']);
+    assert.deepEqual(calls, []);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test('unavailable local file and settings do not disable adjacent web link', async () => {
+  const dom = simpleDom();
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: dom.window.navigator });
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const ReactDOM = await import('react-dom');
+  const client = loadClient(dom, ReactDOM);
+  const root = createRoot(dom.window.document.querySelector('#mount'));
+  const calls = [];
+  const remote = { workspaceFiles: { stat: async (sessionId, path) => {
+    calls.push([sessionId, path]);
+    return { ok: false, error: { message: 'not found' } };
+  } }, session: { openWorkspacePath: () => { throw new Error('must not open'); } } };
+  const unavailable = { status: 'unavailable', value: undefined };
+  try {
+    await act(async () => root.render(React.createElement(client.TurnFilesAction, {
+      messageId: 'answer', sessionId: 'S', remote,
+      form: { subscribe: () => () => {}, getSnapshot: () => unavailable },
+      useChat: (selector) => selector(snapshotFor({ assistant:
+        '[local](missing.pdf) [release](https://github.com/nico/release)' }))
+    })));
+    await act(async () => dom.window.document.querySelector('[data-turn-files-button]').click());
+    assert.deepEqual(calls, [['S', 'missing.pdf']]);
+    const rows = dom.window.document.querySelectorAll('.dtfa-row');
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].querySelector('button.dtfa-open').disabled, true);
+    assert.equal(rows[1].querySelector('a.dtfa-open').href, 'https://github.com/nico/release');
+    assert.equal(rows[1].querySelector('a.dtfa-open').hasAttribute('disabled'), false);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test('edit card alone enables a file only after same-session Host validation', async () => {
+  const dom = simpleDom();
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: dom.window.navigator });
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const ReactDOM = await import('react-dom');
+  const client = loadClient(dom, ReactDOM);
+  const root = createRoot(dom.window.document.querySelector('#mount'));
+  const statCalls = [];
+  const native = [];
+  const remote = { workspaceFiles: { stat: async (sessionId, path) => {
+    statCalls.push([sessionId, path]);
+    return { ok: true, value: { absolutePath: `/workspace/${path}` } };
+  } }, session: { openWorkspacePath: async (request) => {
+    native.push(request);
+    return { ok: true, value: {} };
+  } } };
+  let snapshot = snapshotFor({ assistant: '已修改。', tools: [editedTool('README.md')] });
+  const render = async () => act(async () => root.render(React.createElement(client.TurnFilesAction, {
+    messageId: 'answer', sessionId: 'actual-session', remote,
+    useChat: (selector) => selector(snapshot)
+  })));
+  try {
+    await render();
+    const trigger = dom.window.document.querySelector('[data-turn-files-button]');
+    assert.ok(trigger);
+    await act(async () => trigger.click());
+    assert.deepEqual(statCalls, [['actual-session', 'README.md']]);
+    const row = dom.window.document.querySelector('.dtfa-row');
+    assert.match(row.textContent, /README\.md.*已编辑/u);
+    await act(async () => row.querySelector('.dtfa-open').click());
+    assert.equal(native[0].path, '/workspace/README.md');
+    snapshot = snapshotFor({ assistant: '已创建。', tools: [createdTool('fresh.md')] });
+    await render();
+    assert.deepEqual(statCalls[1], ['actual-session', 'fresh.md']);
+    const created = dom.window.document.querySelector('.dtfa-row');
+    assert.match(created.textContent, /fresh\.md.*已新建/u);
+    await act(async () => created.querySelector('.dtfa-open').click());
+    assert.equal(native[1].path, '/workspace/fresh.md');
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
 });
 
 test('actual React slot hides without files and uses Host stat before native actions', async () => {

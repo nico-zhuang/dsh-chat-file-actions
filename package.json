@@ -1,10 +1,10 @@
 {
   "name": "dsh-chat-file-actions",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "对话文件操作：查看本轮引用文件，支持打开、定位和复制",
+  "description": "对话文件操作：查看本轮文件与网页链接，支持打开、定位和复制",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
