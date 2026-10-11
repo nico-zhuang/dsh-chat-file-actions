@@ -107,6 +107,40 @@ test('excludes indented code and HTML comments, decodes escaped Markdown destina
   dom.window.close();
 });
 
+test('only a whitespace-terminated closing fence ends a code block', () => {
+  const dom = simpleDom();
+  const { extractFileCandidates } = loadClient(dom);
+  const files = extractFileCandidates([
+    '```js\n[hidden](hidden.pdf)\n```javascript\n[still-hidden](still-hidden.pdf)\n```  \n[shown](shown.pdf)',
+    '~~~~md\n@hidden.jpg\n~~~~ suffix\n@still-hidden.jpg\n~~~~\n@shown.jpg',
+    '````md\n[hidden](hidden-again.pdf)\n```\n[still-hidden](still-hidden-again.pdf)\n````\n[shown](last.pdf)',
+    '```md\r\n[hidden](windows-hidden.pdf)\r\n```\r\n[shown](windows-shown.pdf)'
+  ]);
+  assert.deepEqual(Array.from(files, ({ path }) => path), ['shown.pdf', 'shown.jpg', 'last.pdf', 'windows-shown.pdf']);
+  dom.window.close();
+});
+
+test('Windows punctuation paths require unambiguous Markdown or @reference syntax', () => {
+  const dom = simpleDom();
+  const { extractFileCandidates, copyMarkdown } = loadClient(dom);
+  const path = String.raw`C:\work\.env`;
+  const encoded = copyMarkdown(path, '.env');
+  const files = extractFileCandidates([
+    String.raw`[ambiguous](<C:\work\.env>) [ambiguous](<C:\work\_draft.txt>)`,
+    String.raw`@"C:\work\.env"`, encoded,
+    String.raw`[forward](<C:/work/.env>) [web](<file:///C:/work/.env>)`
+  ]);
+  assert.deepEqual(Array.from(files, ({ path: filePath }) => filePath), [path]);
+  assert.equal(extractFileCandidates([encoded])[0].path, path);
+  assert.equal(extractFileCandidates([String.raw`[escaped](<C:\\work\\.env>)`])[0].path, path);
+  assert.equal(extractFileCandidates(['[forward](<C:/work/.env>)'])[0].path, 'C:/work/.env');
+  assert.equal(extractFileCandidates([String.raw`[mixed](<C:/work\.env>)`]).length, 0);
+  assert.equal(extractFileCandidates([String.raw`[encoded-drive](<C:%5Cwork\.env>)`]).length, 0);
+  assert.equal(extractFileCandidates([String.raw`[relative](<subdir\.env>)`]).length, 0);
+  assert.equal(extractFileCandidates([String.raw`[dot-relative](<.\.env>)`]).length, 0);
+  dom.window.close();
+});
+
 test('collects only the addressed answer and its own turn, not another conversation turn', () => {
   const dom = simpleDom();
   const { collectTurnTexts, extractFileCandidates } = loadClient(dom);
@@ -125,7 +159,7 @@ test('copies escaped Markdown without confusing encoded filename characters', ()
   dom.window.close();
 });
 
-test('actual React slot hides without files and uses session-scoped stat before Finder', async () => {
+test('actual React slot hides without files and uses Host stat before native actions', async () => {
   const dom = simpleDom();
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
@@ -172,9 +206,11 @@ test('actual React slot hides without files and uses session-scoped stat before 
     await act(async () => { firstRow.querySelector('.dtfa-open').click(); });
     assert.equal(openCalls[0].path, '/workspace-A/deck.pptx');
     assert.equal(openCalls[0].action, undefined);
-    await act(async () => { firstRow.querySelector('.dtfa-icon[title="在 Finder 中显示"]').click(); });
+    assert.match(dom.window.document.querySelector('[role="status"]').textContent, /已请求系统打开文件/u);
+    await act(async () => { firstRow.querySelector('.dtfa-icon[title="在文件管理器中显示"]').click(); });
     assert.equal(openCalls[1].path, '/workspace-A/deck.pptx');
     assert.equal(openCalls[1].action, 'reveal');
+    assert.match(dom.window.document.querySelector('[role="status"]').textContent, /已请求系统定位文件/u);
     assert.equal(firstRow.querySelectorAll('.dtfa-more-action').length, 0);
     await act(async () => { firstRow.querySelector('.dtfa-icon[title="更多操作"]').click(); });
     assert.equal(firstRow.querySelectorAll('.dtfa-more-action').length, 3);
@@ -217,6 +253,9 @@ test('identical filenames show their differing parents without showing long path
     assert.match(rows[1].querySelector('.dtfa-parent').textContent, /\/b$/u);
     assert.equal(rows[2].querySelector('.dtfa-parent'), null);
     assert.equal(rows[0].querySelector('.dtfa-name').textContent, 'report.pdf');
+    assert.match(rows[0].querySelector('.dtfa-open').getAttribute('aria-label'), /report\.pdf（\/workspace\/a）/u);
+    assert.match(rows[1].querySelector('.dtfa-open').getAttribute('aria-label'), /report\.pdf（\/workspace\/b）/u);
+    assert.equal(rows[2].querySelector('.dtfa-open').getAttribute('aria-label'), '打开 unique.jpg');
   } finally {
     await act(async () => { root.unmount(); });
     dom.window.close();
@@ -278,7 +317,7 @@ test('extractor caps pathological turns at a documented 200 files', () => {
   dom.window.close();
 });
 
-test('missing session cwd cannot resolve relative files or call the Host', async () => {
+test('Host may resolve relative files when client session snapshot has no cwd', async () => {
   const dom = simpleDom();
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
@@ -289,8 +328,11 @@ test('missing session cwd cannot resolve relative files or call the Host', async
   const ReactDOM = await import('react-dom');
   const client = loadClient(dom, ReactDOM);
   const root = createRoot(dom.window.document.querySelector('#mount'));
-  let statCalls = 0;
-  const remote = { workspaceFiles: { stat: async () => { statCalls++; return { ok: true }; } }, session: {} };
+  const statCalls = [];
+  const remote = { workspaceFiles: { stat: async (sessionId, path) => {
+    statCalls.push([sessionId, path]);
+    return { ok: true, value: { absolutePath: '/fallback/relative/report.pdf' } };
+  } }, session: {} };
   try {
     await act(async () => { root.render(React.createElement(client.TurnFilesAction, {
       messageId: 'answer', sessionId: 'session-no-cwd', remote,
@@ -298,8 +340,8 @@ test('missing session cwd cannot resolve relative files or call the Host', async
       useSessions: (selector) => selector({ byId: { 'session-no-cwd': {} } })
     })); });
     await act(async () => { dom.window.document.querySelector('[data-turn-files-button]').click(); });
-    assert.equal(statCalls, 0);
-    assert.match(dom.window.document.querySelector('[data-turn-files-panel]').textContent, /无法确认本会话工作目录/);
+    assert.deepEqual(statCalls, [['session-no-cwd', 'relative/report.pdf']]);
+    assert.equal(dom.window.document.querySelector('.dtfa-open').disabled, false);
   } finally {
     await act(async () => { root.unmount(); });
     dom.window.close();
@@ -329,11 +371,53 @@ test('closing a file list aborts outstanding Host stat requests', async () => {
     })); });
     await act(async () => { dom.window.document.querySelector('[data-turn-files-button]').click(); });
     assert.equal(signal.aborted, false);
-    await act(async () => { dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
-      key: 'Escape', bubbles: true
-    })); });
+    await act(async () => { dom.window.document.querySelector('#mount').dispatchEvent(
+      new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    assert.ok(dom.window.document.querySelector('[data-turn-files-panel]'));
+    assert.equal(signal.aborted, false);
+    await act(async () => { dom.window.document.querySelector('[data-turn-files-panel]').dispatchEvent(
+      new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
     assert.equal(signal.aborted, true);
     assert.equal(dom.window.document.querySelector('[data-turn-files-panel]'), null);
+  } finally {
+    await act(async () => { root.unmount(); });
+    dom.window.close();
+  }
+});
+
+test('late stat from a closed panel never overwrites its reopened view', async () => {
+  const dom = simpleDom();
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: dom.window.navigator });
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const ReactDOM = await import('react-dom');
+  const client = loadClient(dom, ReactDOM);
+  const root = createRoot(dom.window.document.querySelector('#mount'));
+  const pending = [];
+  const signals = [];
+  const remote = { workspaceFiles: { stat: async (_id, _path, signal) => {
+    signals.push(signal);
+    return new Promise((resolve) => pending.push(resolve));
+  } }, session: {} };
+  try {
+    await act(async () => { root.render(React.createElement(client.TurnFilesAction, {
+      messageId: 'answer', sessionId: 'session-A', remote,
+      useChat: (selector) => selector(snapshotFor({ assistant: '[one](one.jpg)' }))
+    })); });
+    const trigger = dom.window.document.querySelector('[data-turn-files-button]');
+    await act(async () => { trigger.click(); });
+    await act(async () => { trigger.click(); });
+    assert.equal(signals[0].aborted, true);
+    await act(async () => { trigger.click(); });
+    assert.equal(pending.length, 2);
+    await act(async () => { pending[0]({ ok: true, value: { absolutePath: '/old/one.jpg' } }); });
+    assert.equal(dom.window.document.querySelector('.dtfa-open').disabled, true);
+    await act(async () => { pending[1]({ ok: true, value: { absolutePath: '/new/one.jpg' } }); });
+    assert.equal(dom.window.document.querySelector('.dtfa-open').disabled, false);
+    assert.match(dom.window.document.querySelector('.dtfa-open').title, /\/new\/one\.jpg/u);
   } finally {
     await act(async () => { root.unmount(); });
     dom.window.close();
