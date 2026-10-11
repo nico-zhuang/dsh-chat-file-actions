@@ -1,0 +1,9 @@
+node_modules/
+demo-files/
+test/make-fixtures.py
+*.tgz
+*.log
+coverage/
+.DS_Store
+.env
+.env.*
