@@ -2,7 +2,7 @@
 
 一个 DeepSeek Harness 插件：在已完成的回复下按需显示「本轮文件」，集中打开、定位和复制本轮引用的本地文件。不覆盖右键菜单，也不修改 DSH 本体。
 
-> 面向 DeepSeek Harness **0.2.0-rc.2**。系统应用与文件管理器操作发生在 **DSH Host 所在电脑**；侧栏查看发生在 DSH 页面。原有 macOS 系统打开交互曾经实测；0.3.0 新功能已通过自动化测试，侧栏联调和 Windows 桌面尚未实测。
+> 面向 DeepSeek Harness **0.2.0-rc.2**。系统应用与文件管理器操作发生在 **DSH Host 所在电脑**；侧栏查看发生在 DSH 页面。0.3.0 通过 20 项自动化测试，并经用户在 macOS 上试用反馈正常；Windows 桌面尚未实测。
 
 ## 效果预览
 
@@ -30,7 +30,7 @@
 
 ## 安装
 
-1. 从 [Releases](https://github.com/nico-zhuang/dsh-chat-file-actions/releases) 下载 `dsh-chat-file-actions-0.3.0.tgz`；如果该版本尚未发布，可按下文从源码打包。
+1. 从 [v0.3.0 Release](https://github.com/nico-zhuang/dsh-chat-file-actions/releases/tag/v0.3.0) 下载 `dsh-chat-file-actions-0.3.0.tgz`；也可按下文从源码打包。
 2. 在 DSH 插件管理器中安装本地包并启用 **对话文件操作**。
 3. 若提示 `restart-required`，保存其他任务后**手动重启 DSH**；只刷新页面可能不够。
 
@@ -69,4 +69,4 @@ npm pack --ignore-scripts
 
 The compact list follows DSH's theme and scrolls independently. The owning session's `workspaceFiles.stat` verifies up to 200 candidates, with at most six concurrent checks **per opening**; cancellation is best-effort. Sidebar opens require the addressed Session to be on screen and an available DSH preview; they never silently launch a Host app on failure. Profile settings are Host-owned and writable only from pages DSH treats as loopback. The plugin adds no native commands or custom Host routes.
 
-Download the `.tgz` from [Releases](https://github.com/nico-zhuang/dsh-chat-file-actions/releases), or build it locally until v0.3.0 is published. Install it through the DSH plugin manager and restart manually if requested. Developed against DSH 0.2.0-rc.2; native-sidebar integration and Windows desktop operation have not yet been validated on a live runtime. Independent community plugin, not an official DeepSeek product.
+Download `dsh-chat-file-actions-0.3.0.tgz` from the [v0.3.0 Release](https://github.com/nico-zhuang/dsh-chat-file-actions/releases/tag/v0.3.0), or build it locally. Install through the DSH plugin manager and restart manually if requested. Developed against DSH 0.2.0-rc.2; the user reported a successful macOS trial, while Windows desktop operation remains unverified. Independent community plugin, not an official DeepSeek product.
