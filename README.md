@@ -2,7 +2,7 @@
 
 一个 DeepSeek Harness 插件：在已完成的回复下按需显示「本轮资源」，集中操作本轮明确引用的本地文件、网页链接和已编辑文件。不覆盖右键菜单，也不修改 DSH 本体。
 
-> 面向 DeepSeek Harness **0.2.0-rc.2**。当前源码为 **0.4.0 开发候选，尚未安装实机验收或发布**；已发布的 0.3.0 通过 20 项自动化测试，并经用户在 macOS 上试用反馈正常。系统应用与文件管理器操作发生在 **DSH Host 所在电脑**；侧栏查看发生在 DSH 页面。Windows 桌面尚未实测。
+> 面向 DeepSeek Harness **0.2.0-rc.2**。**0.4.0** 通过 33 项自动化测试，已在用户的 macOS DSH Profile 中安装试用；系统应用与文件管理器操作发生在 **DSH Host 所在电脑**，侧栏查看发生在 DSH 页面。Windows 桌面尚未实测。
 
 ## 效果预览
 
@@ -37,9 +37,9 @@
 
 ## 安装
 
-**0.4.0 尚未发布，也未在 DSH 实机验收。**试用本分支时请按下文从源码打包得到 `dsh-chat-file-actions-0.4.0.tgz`；已发布的稳定版仍可从 [v0.3.0 Release](https://github.com/nico-zhuang/dsh-chat-file-actions/releases/tag/v0.3.0) 下载。
+从 [v0.4.0 Release](https://github.com/nico-zhuang/dsh-chat-file-actions/releases/tag/v0.4.0) 下载 `dsh-chat-file-actions-0.4.0.tgz`；旧版仍可从 [v0.3.0 Release](https://github.com/nico-zhuang/dsh-chat-file-actions/releases/tag/v0.3.0) 下载。
 
-1. 在 DSH 插件管理器中安装本地包并启用 **对话文件操作**；请勿将开发分支的包当作已发布的 GitHub 附件。
+1. 在 DSH 插件管理器中安装下载的本地包并启用 **对话文件操作**。
 2. 若提示 `restart-required`，保存其他任务后**手动重启 DSH**；只刷新页面可能不够。
 
 从源码构建：
@@ -50,7 +50,7 @@ npm test
 npm pack --ignore-scripts
 ```
 
-本仓库未发布到 npm registry。`package.json` 保留 `private: true`，以防误发布；已公开 GitHub Release 的 `.tgz` 是对应旧版本安装文件，0.4.0 仍待实机验收与单独发布。禁用或移除插件会撤销操作栏插槽和样式，不会修改会话文件。
+本仓库未发布到 npm registry。`package.json` 保留 `private: true`，以防误发布；GitHub Release 中的 `.tgz` 才是对应版本的安装包。禁用或移除插件会撤销操作栏插槽和样式，不会修改会话文件。
 
 ## 实现与边界
 
@@ -74,10 +74,10 @@ npm pack --ignore-scripts
 
 ## English
 
-**DSH Chat File Actions 0.4.0 (unreleased candidate)** adds a paperclip beneath completed replies for explicit local-file references, Markdown `http(s)` links, and successful same-turn `edit`/`write` file cards. All entries share the same compact single-line list. A local file opens with the Host's default app (the unchanged default) or, if configured, in DSH's native right sidebar; Reveal and the configurable copy actions remain file-only. A web link opens in the browser and offers Copy URL / Copy Markdown under the same **More** style, with its true destination host shown beside the label.
+**DSH Chat File Actions 0.4.0** adds a paperclip beneath completed replies for explicit local-file references, Markdown `http(s)` links, and successful same-turn `edit`/`write` file cards. All entries share the same compact single-line list. A local file opens with the Host's default app (the unchanged default) or, if configured, in DSH's native right sidebar; Reveal and the configurable copy actions remain file-only. A web link opens in the browser and offers Copy URL / Copy Markdown under the same **More** style, with its true destination host shown beside the label.
 
 The plugin follows DSH's global Chinese/English setting: the plugin-manager title, description, settings summary and form, plus the open resource popup, menus, accessibility labels and feedback switch live. File-action preferences remain unchanged; there is no separate plugin language preference.
 
 The compact list follows DSH's theme and scrolls independently. Up to 200 combined resources are shown, reserving room for applied edit/write files. Local paths—including those taken from tool-card metadata—are verified through the owning session's `workspaceFiles.stat`, with at most six concurrent checks **per opening**; cancellation is best-effort. Web links do not call Host file APIs and never load automatically. Sidebar opens require the addressed Session to be on screen and an available DSH preview; they never silently launch a Host app on failure. Profile settings are Host-owned and writable only from pages DSH treats as loopback. The structured tool-card contract is specific to DSH 0.2.0-rc.2, not a promised stable API.
 
-0.4.0 is not yet published or live-validated: build its `.tgz` from this branch before testing. The [v0.3.0 Release](https://github.com/nico-zhuang/dsh-chat-file-actions/releases/tag/v0.3.0) remains the published, user-tested macOS version. Install a local package through the DSH plugin manager and restart manually only if requested. Developed against DSH 0.2.0-rc.2; Windows desktop operation remains unverified. Independent community plugin, not an official DeepSeek product.
+Download the archive from the [v0.4.0 Release](https://github.com/nico-zhuang/dsh-chat-file-actions/releases/tag/v0.4.0) and install it through the DSH plugin manager; restart manually if DSH reports `restart-required`. The previous [v0.3.0 Release](https://github.com/nico-zhuang/dsh-chat-file-actions/releases/tag/v0.3.0) remains available. Version 0.4.0 passed 33 automated tests and has been installed for testing in the user's macOS DSH profile. Developed against DSH 0.2.0-rc.2; Windows desktop operation remains unverified. Independent community plugin, not an official DeepSeek product.
