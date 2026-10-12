@@ -68,21 +68,58 @@ function simpleDom() {
   });
 }
 
+function localeFace(initial = 'zh') {
+  let snapshot = { active: initial, revision: 1 };
+  let registered = null;
+  const listeners = new Set();
+  const announce = () => { snapshot = { ...snapshot, revision: snapshot.revision + 1 };
+    for (const listener of listeners) listener(); };
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+    register: (ns, dictionaries) => {
+      assert.equal(ns, 'dsh-chat-file-actions');
+      assert.deepEqual(Object.keys(dictionaries).sort(), ['en', 'zh']);
+      registered = dictionaries;
+      announce();
+      return () => { registered = null; announce(); };
+    },
+    bind: (ns) => {
+      assert.equal(ns, 'dsh-chat-file-actions');
+      return (key, params) => {
+        const text = registered?.[snapshot.active]?.[key] || registered?.en?.[key] || key;
+        return text.replace(/\{(\w+)\}/gu, (match, name) => name in (params || {}) ?
+          String(params[name]) : match);
+      };
+    },
+    setLocale: (active) => { snapshot = { ...snapshot, active }; announce(); },
+    registered: () => registered
+  };
+}
+
+function installLocale(client, locale) {
+  const disposers = [];
+  client.apply({ locale, remote: {}, configForms: { get: () => ({}) },
+    slots: { inject: () => {} }, effect: (callback) => { disposers.push(callback()); } });
+  return () => { for (const dispose of disposers.reverse()) dispose(); };
+}
+
 test('registers file action and its own plugin-manager settings row, then disposes styles', () => {
   const dom = simpleDom();
   const client = loadClient(dom);
   const registrations = [];
   const forms = [];
-  let styleDispose;
+  const disposers = [];
+  const locale = localeFace();
   const ctx = {
-    remote: {}, get: () => undefined,
+    remote: {}, locale, get: () => undefined,
     configForms: { get: (namespace) => { forms.push(namespace); return { getSnapshot: () => ({ status: 'ready' }),
       subscribe: () => () => {} }; } },
     slots: {
       inject: (_name, callback) => { callback(); },
       register: (options, component) => { registrations.push({ options, component }); return () => {}; }
     },
-    effect: (callback) => { styleDispose = callback(); }
+    effect: (callback) => { disposers.push(callback()); }
   };
   client.apply(ctx);
   assert.deepEqual(forms, ['chat-file-actions']);
@@ -93,11 +130,36 @@ test('registers file action and its own plugin-manager settings row, then dispos
   assert.equal(typeof registration.component, 'function');
   const settings = registrations.find(({ options }) => options.name === 'plugins.row.config');
   assert.equal(settings.options.key, 'dsh-chat-file-actions#chat-file-actions');
-  assert.equal(settings.component, client.SettingsPage);
+  assert.equal(typeof settings.component, 'function');
+  assert.equal(settings.component({ view: 'summary', form: {} }).props.locale, locale);
+  assert.equal(registration.options.inject().locale, locale);
+  assert.equal(locale.registered().en.settingsSaved, 'Settings saved');
+  assert.equal(locale.registered().zh.settingsSaved, '设置已保存');
+  assert.deepEqual(Object.keys(locale.registered().zh).sort(), Object.keys(locale.registered().en).sort());
+  for (const key of Object.keys(locale.registered().zh)) {
+    const variables = (value) => [...value.matchAll(/\{(\w+)\}/gu)].map((match) => match[1]).sort();
+    assert.deepEqual(variables(locale.registered().zh[key]), variables(locale.registered().en[key]), key);
+  }
+  assert.ok(client.inject.includes('locale'));
   assert.equal(dom.window.document.querySelectorAll('style[data-plugin-css="dsh-chat-file-actions"]').length, 1);
-  styleDispose();
+  for (const dispose of disposers.reverse()) dispose();
+  assert.equal(locale.registered(), null);
   assert.equal(dom.window.document.querySelectorAll('style[data-plugin-css="dsh-chat-file-actions"]').length, 0);
   dom.window.close();
+});
+
+test('package exports localized plugin-manager metadata for both DSH languages', () => {
+  const manifest = JSON.parse(fs.readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'));
+  assert.equal(manifest.exports['./package.json'], './package.json');
+  assert.equal(manifest.exports['./locale/*.json'], './locale/*.json');
+  assert.ok(manifest.files.includes('locale'));
+  assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-locale'));
+  for (const language of ['zh', 'en']) {
+    const locale = JSON.parse(fs.readFileSync(fileURLToPath(new URL(`../locale/${language}.json`, import.meta.url)), 'utf8'));
+    assert.equal(typeof locale.meta.title, 'string');
+    assert.equal(typeof locale.meta.description, 'string');
+    assert.ok(locale.meta.title.length > 0 && locale.meta.description.length > 0);
+  }
 });
 
 test('matches file links and @references while excluding code, URLs, folders and duplicates', () => {
@@ -332,6 +394,93 @@ test('settings normalize ordered copies and encode session-scoped sidebar addres
   dom.window.close();
 });
 
+test('open mixed resource popup follows global language without revalidating files', async () => {
+  const dom = simpleDom();
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: dom.window.navigator });
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const ReactDOM = await import('react-dom');
+  const client = loadClient(dom, ReactDOM);
+  const locale = localeFace('zh');
+  const dispose = installLocale(client, locale);
+  const root = createRoot(dom.window.document.querySelector('#mount'));
+  const statCalls = [];
+  const copied = [];
+  Object.defineProperty(dom.window.navigator, 'clipboard', { configurable: true,
+    value: { writeText: async (text) => { copied.push(text); } } });
+  const remote = { workspaceFiles: { stat: async (sessionId, path) => {
+    statCalls.push([sessionId, path]);
+    return { ok: true, value: { absolutePath: `/work/${path}` } };
+  } }, session: { openWorkspacePath: () => { throw new Error('not used'); } } };
+  try {
+    await act(async () => root.render(React.createElement(client.TurnFilesAction, {
+      messageId: 'answer', sessionId: 'session-A', remote, locale,
+      useChat: (selector) => selector(snapshotFor({
+        assistant: '[file](docs/report.pdf) [site](https://example.test/download)',
+        tools: [editedTool('README.md')]
+      }))
+    })));
+    const trigger = dom.window.document.querySelector('[data-turn-files-button]');
+    assert.match(trigger.getAttribute('aria-label'), /本轮资源，3 个候选/u);
+    await act(async () => trigger.click());
+    assert.equal(statCalls.length, 2);
+    assert.match(dom.window.document.querySelector('.dtfa-row').textContent, /README\.md.*已编辑/u);
+    await act(async () => locale.setLocale('en'));
+    const panel = dom.window.document.querySelector('[data-turn-files-panel]');
+    assert.equal(panel.getAttribute('aria-label'), 'Turn resources');
+    assert.equal(panel.querySelector('.dtfa-list').getAttribute('aria-label'), 'Resource list');
+    assert.match(dom.window.document.querySelector('.dtfa-row').textContent, /README\.md.*Edited/u);
+    assert.match(trigger.getAttribute('aria-label'), /Turn resources, 3 candidates/u);
+    const web = Array.from(panel.querySelectorAll('.dtfa-row')).find((row) => row.querySelector('a.dtfa-open'));
+    assert.match(web.querySelector('a.dtfa-open').getAttribute('aria-label'), /destination example\.test/u);
+    await act(async () => web.querySelector('[title="More actions"]').click());
+    assert.deepEqual(Array.from(web.querySelectorAll('.dtfa-more-action'), (button) => button.textContent),
+      ['Copy URL', 'Copy Markdown link']);
+    await act(async () => web.querySelector('.dtfa-more-action').click());
+    assert.equal(panel.querySelector('.dtfa-status').textContent, 'Copied');
+    assert.deepEqual(copied, ['https://example.test/download']);
+    await act(async () => locale.setLocale('zh'));
+    assert.equal(panel.querySelector('.dtfa-status').textContent, '已复制');
+    assert.equal(statCalls.length, 2);
+  } finally {
+    await act(async () => root.unmount());
+    dispose();
+    dom.window.close();
+  }
+});
+
+test('single resource count is grammatical in English and remains Chinese after switching back', async () => {
+  const dom = simpleDom();
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: dom.window.navigator });
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const ReactDOM = await import('react-dom');
+  const client = loadClient(dom, ReactDOM);
+  const locale = localeFace('en');
+  const dispose = installLocale(client, locale);
+  const root = createRoot(dom.window.document.querySelector('#mount'));
+  try {
+    await act(async () => root.render(React.createElement(client.TurnFilesAction, {
+      messageId: 'answer', sessionId: 'S', remote: {}, locale,
+      useChat: (selector) => selector(snapshotFor({ assistant: '[one](https://example.test)' }))
+    })));
+    const trigger = dom.window.document.querySelector('[data-turn-files-button]');
+    assert.equal(trigger.getAttribute('aria-label'), 'Turn resources, 1 candidate');
+    await act(async () => locale.setLocale('zh'));
+    assert.equal(trigger.getAttribute('aria-label'), '本轮资源，1 个候选');
+  } finally {
+    await act(async () => root.unmount());
+    dispose();
+    dom.window.close();
+  }
+});
+
 test('web-only turn uses native safe anchors and copies links without Host file calls', async () => {
   const dom = simpleDom();
   globalThis.window = dom.window;
@@ -395,6 +544,8 @@ test('unavailable local file and settings do not disable adjacent web link', asy
   const { act } = await import('react');
   const ReactDOM = await import('react-dom');
   const client = loadClient(dom, ReactDOM);
+  const locale = localeFace('en');
+  const dispose = installLocale(client, locale);
   const root = createRoot(dom.window.document.querySelector('#mount'));
   const calls = [];
   const remote = { workspaceFiles: { stat: async (sessionId, path) => {
@@ -404,7 +555,7 @@ test('unavailable local file and settings do not disable adjacent web link', asy
   const unavailable = { status: 'unavailable', value: undefined };
   try {
     await act(async () => root.render(React.createElement(client.TurnFilesAction, {
-      messageId: 'answer', sessionId: 'S', remote,
+      messageId: 'answer', sessionId: 'S', remote, locale,
       form: { subscribe: () => () => {}, getSnapshot: () => unavailable },
       useChat: (selector) => selector(snapshotFor({ assistant:
         '[local](missing.pdf) [release](https://github.com/nico/release)' }))
@@ -416,8 +567,18 @@ test('unavailable local file and settings do not disable adjacent web link', asy
     assert.equal(rows[0].querySelector('button.dtfa-open').disabled, true);
     assert.equal(rows[1].querySelector('a.dtfa-open').href, 'https://github.com/nico/release');
     assert.equal(rows[1].querySelector('a.dtfa-open').hasAttribute('disabled'), false);
+    assert.match(rows[0].textContent, /File unavailable/u);
+    assert.equal(rows[0].querySelector('[role="status"]').getAttribute('aria-description'), 'not found');
+    assert.match(dom.window.document.querySelector('.dtfa-status').textContent,
+      /Could not load open-mode settings/u);
+    await act(async () => locale.setLocale('zh'));
+    assert.match(rows[0].textContent, /文件不可用/u);
+    assert.match(dom.window.document.querySelector('.dtfa-status').textContent,
+      /无法读取打开方式设置/u);
+    assert.equal(calls.length, 1);
   } finally {
     await act(async () => root.unmount());
+    dispose();
     dom.window.close();
   }
 });
@@ -533,6 +694,56 @@ test('actual React slot hides without files and uses Host stat before native act
     assert.match(copied[2], /^\[deck.pptx\]\(<\/workspace-A\/deck.pptx>\)$/u);
   } finally {
     await act(async () => { root.unmount(); });
+    dom.window.close();
+  }
+});
+
+test('plugin-manager summary and settings react to global zh/en switches without changing preferences', async () => {
+  const dom = simpleDom();
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: dom.window.navigator });
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import('react-dom/client');
+  const { act } = await import('react');
+  const ReactDOM = await import('react-dom');
+  const client = loadClient(dom, ReactDOM);
+  const locale = localeFace('zh');
+  const dispose = installLocale(client, locale);
+  const root = createRoot(dom.window.document.querySelector('#mount'));
+  const mutations = [];
+  const form = { state: { status: 'ready', writable: true, mode: 'host', revision: 7,
+    value: { openMode: 'system', copyActions: ['path', 'name', 'markdown'] } },
+  mutate: async (patch, revision) => { mutations.push({ patch, revision }); return true; } };
+  const render = (view) => act(async () => root.render(React.createElement(client.SettingsPage,
+    { view, form, locale })));
+  try {
+    await render('summary');
+    assert.match(dom.window.document.body.textContent, /系统应用打开 · 3 项复制操作/u);
+    await act(async () => locale.setLocale('en'));
+    assert.match(dom.window.document.body.textContent, /Open in system app · 3 copy actions/u);
+    await render('page');
+    assert.match(dom.window.document.body.textContent, /When clicking a file name/u);
+    assert.match(dom.window.document.body.textContent, /Copy buttons in More actions/u);
+    assert.match(dom.window.document.body.textContent, /Copy file name/u);
+    assert.ok(dom.window.document.querySelector('[aria-label="Move Copy path down"]'));
+    await act(async () => dom.window.document.querySelector('.dtfa-settings-save').click());
+    assert.match(dom.window.document.querySelector('[role="status"]').textContent, /Settings saved/u);
+    assert.equal(mutations[0].revision, 7);
+    await act(async () => locale.setLocale('zh'));
+    assert.match(dom.window.document.querySelector('[role="status"]').textContent, /设置已保存/u);
+    assert.equal(dom.window.document.querySelectorAll('.dtfa-settings input:checked').length, 4);
+    form.state = { ...form.state, revision: 8,
+      value: { ...form.state.value, copyActions: ['path'] } };
+    await act(async () => locale.setLocale('en'));
+    await render('summary');
+    assert.match(dom.window.document.body.textContent, /1 copy action$/u);
+    await act(async () => locale.setLocale('zh'));
+    assert.match(dom.window.document.body.textContent, /1 项复制操作$/u);
+    assert.equal(mutations.length, 1);
+  } finally {
+    await act(async () => root.unmount());
+    dispose();
     dom.window.close();
   }
 });
@@ -730,16 +941,16 @@ test('large file turns scroll inside the panel with at most six concurrent stat 
     assert.ok(peak <= 6, `peak concurrency ${peak}`);
     assert.equal(dom.window.document.querySelectorAll('[role="listitem"]').length, 80);
     // CSS is installed by apply() in production; call it here to inspect scroll and theme rules.
-    let dispose;
-    client.apply({ remote, configForms: { get: () => ({}) }, slots: { inject: () => {} },
-      effect: (effect) => { dispose = effect(); } });
+    const disposers = [];
+    client.apply({ remote, locale: localeFace(), configForms: { get: () => ({}) }, slots: { inject: () => {} },
+      effect: (effect) => { disposers.push(effect()); } });
     const styles = dom.window.document.querySelector('style[data-plugin-css="dsh-chat-file-actions"]').textContent;
     assert.match(styles, /\.dtfa-list\s*\{[^}]*overflow-y:auto/u);
     assert.match(styles, /--dsw-alias-bg-overlay/u);
     assert.match(styles, /--dsw-alias-border-l1/u);
     assert.match(styles, /prefers-color-scheme:dark/u);
     assert.match(styles, /\.dtfa-trigger svg\s*\{\s*width:17px/u);
-    dispose();
+    for (const dispose of disposers.reverse()) dispose();
   } finally {
     await act(async () => { root.unmount(); });
     dom.window.close();

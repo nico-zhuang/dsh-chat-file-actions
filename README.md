@@ -31,6 +31,8 @@
 
 进入插件管理器的「对话文件操作」配置页，选择**本地文件名**的打开方式，勾选并用上下按钮排列**本地文件**的复制操作，然后保存。默认设置与 0.2.1 一致；如果三个文件复制项都隐藏，系统打开模式的文件行不显示「更多」按钮；网页链接行仍可复制网址或 Markdown 链接。设置保存在 DSH Host 的 Profile 配置中；若 DSH 判定当前连接不是 loopback，设置页不可持久保存，也不会退而使用浏览器本地存储。
 
+**语言跟随 DSH 全局设置**：切换「中文／English」后，插件管理器中的名称、简介、设置摘要和表单，以及已经展开的本轮资源弹窗、菜单、读屏标签和操作反馈都会切换；无须给插件另设语言，也不会改变已保存的打开方式和复制顺序。
+
 列表默认只显示文件名；同名文件会补充父目录，悬停可查看完整路径。标题固定，文件列表独立滚动。界面使用 DSH 日夜主题色、线性图标和文件类型图标，支持键盘操作。
 
 ## 安装
@@ -58,12 +60,13 @@ npm pack --ignore-scripts
 - 每轮最多显示前 **200** 个资源，优先给成功编辑／创建的文件预留额度；**每次展开**最多并发 **6** 个本地文件验证请求。关闭弹层会发出取消信号并忽略过期结果；若旧请求不响应取消，连续展开期间在途请求可能超过 6 个。
 - 系统打开和定位调用 DSH 的 `session.openWorkspacePath`，插件不运行 shell 命令；原生命令被受理也不保证窗口实际出现。侧栏模式调用 DSH 原生 `sidebarRight.openResource`，使用已验证文件的会话地址，并核对当前显示的 `sessionId`；侧栏不可用时不自动改为系统打开。文档预览由 DSH 决定：图片、PDF 可在页面查看，Office 需要 Host 转换，均受格式、文件大小与服务可用性限制。只有点击复制按钮才会写入剪贴板。
 - 本地文件打开方式和有序复制项由 DSH 的 Host Config／配置表单保存；配置还未读取或不可用时禁用文件名主按钮，保留显式系统打开入口。网页链接不受文件打开方式影响：主动作是带 `noopener noreferrer` 的浏览器链接，次要动作复制网址或 Markdown 链接。侧栏不依赖 `dsh-better-sidebar`，也不注册新的预览器。
+- 中英文 UI 由 DSH Client 的 `locale` 服务读取 `zh`／`en` 全局选择并订阅切换；插件管理器的名称和简介则由包内 `locale/zh.json`、`locale/en.json` 元数据提供。Host Config 仍只保存与语言无关的动作 ID，不增加独立语言偏好。DSH 其他语言若回退到英文，插件文案也跟随服务的回退链。
 - Windows Markdown 路径建议使用 `/`、将反斜杠编码为 `%5C`，或使用插件生成的「复制链接」。原始 `C:\work\.env` 等反斜杠紧贴 Markdown 标点的写法有歧义，插件会跳过，以免指向另一个文件；`@"C:\work\.env"` 引用不经 Markdown 转义。暂不支持 UNC 和 `file:` 形式的 Markdown 文件链接。
 - 自动测试模拟 React 和 Remote，不能代替各操作系统、各 DSH 版本的实机验收。报告兼容问题时，请在 GitHub Issues 提供 DSH 版本和复现步骤，不要公开私人路径、令牌或完整会话记录。
 
 ## 开发
 
-浏览器入口 `lib/client.js` 使用 `configForms` 和现有文件 Remote；Host 入口 `lib/index.js` 仅声明由 DSH 设置服务管理的 Config schema，不增加命令权限或自建路由。清单位于 `package.json`、`cordis.patch.yml`。测试覆盖单轮隔离、带括号外链与真实域名、安全协议过滤、结构化编辑／新建卡、会话路径验证、复制、限流、配置保存与排序、侧栏会话匹配及不可用时的显式备选。
+浏览器入口 `lib/client.js` 使用 DSH `locale`、`configForms` 和现有文件 Remote；Host 入口 `lib/index.js` 仅声明由 DSH 设置服务管理的 Config schema，不增加命令权限或自建路由。插件管理器的翻译元数据位于 `locale/zh.json` 和 `locale/en.json`，清单位于 `package.json`、`cordis.patch.yml`。测试覆盖语言服务订阅、管理器与弹窗热切换及配置不变性、单轮隔离、带括号外链与真实域名、安全协议过滤、结构化编辑／新建卡、会话路径验证、复制、限流、配置保存与排序、侧栏会话匹配及不可用时的显式备选。
 
 本项目是独立社区插件，与 DeepSeek Harness 官方无隶属关系。许可证见 [LICENSE](./LICENSE)。
 
@@ -72,6 +75,8 @@ npm pack --ignore-scripts
 ## English
 
 **DSH Chat File Actions 0.4.0 (unreleased candidate)** adds a paperclip beneath completed replies for explicit local-file references, Markdown `http(s)` links, and successful same-turn `edit`/`write` file cards. All entries share the same compact single-line list. A local file opens with the Host's default app (the unchanged default) or, if configured, in DSH's native right sidebar; Reveal and the configurable copy actions remain file-only. A web link opens in the browser and offers Copy URL / Copy Markdown under the same **More** style, with its true destination host shown beside the label.
+
+The plugin follows DSH's global Chinese/English setting: the plugin-manager title, description, settings summary and form, plus the open resource popup, menus, accessibility labels and feedback switch live. File-action preferences remain unchanged; there is no separate plugin language preference.
 
 The compact list follows DSH's theme and scrolls independently. Up to 200 combined resources are shown, reserving room for applied edit/write files. Local paths—including those taken from tool-card metadata—are verified through the owning session's `workspaceFiles.stat`, with at most six concurrent checks **per opening**; cancellation is best-effort. Web links do not call Host file APIs and never load automatically. Sidebar opens require the addressed Session to be on screen and an available DSH preview; they never silently launch a Host app on failure. Profile settings are Host-owned and writable only from pages DSH treats as loopback. The structured tool-card contract is specific to DSH 0.2.0-rc.2, not a promised stable API.
 
